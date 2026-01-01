@@ -1,159 +1,180 @@
 import streamlit as st
 import pandas as pd
 from ics import Calendar, Event
-from datetime import datetime, timedelta
-import io
 
-# --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Nöbet Takvimi Oluşturucu", page_icon="📅")
+st.set_page_config(page_title="Tüm Görevler Dağıtıcı", page_icon="🏥")
 
-st.title("📅 Asistan Nöbet Takvimi Dönüştürücü")
+st.title("🏥 Tam Kapsamlı Akıllı Dağıtıcı")
 st.markdown("""
-Bu araç, nöbet listenizi (Excel/CSV) telefon takviminize (Google/Apple Calendar) yükleyebileceğiniz 
-**.ics** formatına dönüştürür.
+Bu versiyon şunları yapar:
+1.  **Nöbet:** 'Nöbet' yazanları nöbetçi hocayla eşler.
+2.  **Ameliyat:** Görevi 'Ameliyat' olanları 'Masa/Salon' sütunlarına dağıtır.
+3.  **Poliklinik:** Görevi 'Poliklinik' olanları 'Poliklinik' sütunlarına dağıtır.
+4.  **Diğer:** Görev ismiyle eşleşen herhangi bir uzman sütunu varsa oraya dağıtır.
 """)
 
-# --- KULLANICI GİRİŞ ALANI ---
-with st.container():
-    st.subheader("1. Bilgilerinizi Girin")
-    col1, col2 = st.columns(2)
+col1, col2 = st.columns(2)
+with col1:
+    asistan_file = st.file_uploader("Asistan Listesi", type=["xlsx", "xls", "csv"], key="asistan")
+with col2:
+    uzman_file = st.file_uploader("Uzman Listesi (Sütun Bazlı)", type=["xlsx", "xls", "csv"], key="uzman")
+
+def clean_df(df):
+    df = df.dropna(how='all')
+    df.columns = df.columns.astype(str).str.strip()
+    return df
+
+def find_col(columns, keywords):
+    for col in columns:
+        for key in keywords:
+            if key in col.lower():
+                return col
+    return None
+
+def get_matching_expert_columns(expert_cols, task_name):
+    """
+    Asistanın görev ismine göre Uzman dosyasındaki ilgili sütunları bulur.
+    Örn: Görev 'Poliklinik' ise -> İçinde 'Pol' geçen sütunları getirir.
+    """
+    task_lower = task_name.lower()
+    found_cols = []
     
-    with col1:
-        # Kullanıcı ismini buradan alıyoruz
-        target_name = st.text_input("Adınız Soyadınız", placeholder="Örn: Mehmet Tahir Sekizkardeş")
-        st.caption("⚠️ Listede isminiz nasıl geçiyorsa öyle yazmaya çalışın (Büyük/küçük harf fark etmez).")
+    # Eşleştirme Kuralları (Genişletilebilir)
+    keywords_map = {
+        "ameliyat": ["ameliyat", "masa", "salon", "oda", "operasyon"],
+        "poliklinik": ["poliklinik", "pol", "poli"],
+        "servis": ["servis", "yatak", "klinik"],
+        "lab": ["laboratuvar", "lab"]
+    }
     
-    with col2:
-        uploaded_file = st.file_uploader("Dosyayı Yükleyin", type=["csv", "xlsx"])
+    # 1. Önce tanımlı kurallara bak
+    search_terms = []
+    for key, terms in keywords_map.items():
+        if key in task_lower:
+            search_terms = terms
+            break
+            
+    # 2. Eğer tanımlı kural yoksa, görev isminin kendisini ara
+    if not search_terms:
+        search_terms = [task_lower]
 
-# --- İŞLEM FONKSİYONU ---
-def create_calendar(df, user_name):
-    cal = Calendar()
-    user_name = user_name.lower().strip()
-    
-    # Sütun isimlerini temizle
-    df.columns = [str(c).strip() for c in df.columns]
-
-    # Sütunları tanı
-    nobet_cols = [c for c in df.columns if "NÖBET" in c and "ERTESİ" not in c]
-    ertesi_cols = [c for c in df.columns if "NÖBET ERTESİ" in c]
-    pol_ameliyat_cols = [c for c in df.columns if "POL" in c or "AMELİYAT" in c]
-
-    # İstatistikler
-    stats = {"nobet": 0, "pol": 0, "ameliyat": 0}
-
-    for idx, row in df.iterrows():
-        # Tarih Sütunu (Genelde ilk sütun veya 'Unnamed: 0')
-        date_val = row.iloc[0] 
-        
-        try:
-            # Tarih formatı dosyanıza göre değişebilir. 
-            # Şu anki dosyada M/D/YY formatı var (12/1/25)
-            if isinstance(date_val, str):
-                current_date = datetime.strptime(date_val, "%m/%d/%y")
-            elif isinstance(date_val, datetime):
-                current_date = date_val
-            else:
-                continue
-        except ValueError:
+    # Sütunları tara (Tarih ve Nöbet hariç)
+    for col in expert_cols:
+        c_low = col.lower()
+        if "tarih" in c_low or "nöbet" in c_low or "icap" in c_low:
             continue
-
-        # --- 1. KURAL: Nöbet Ertesi Kontrolü ---
-        is_ertesi = False
-        for col in ertesi_cols:
-            val = str(row[col])
-            if user_name in val.lower():
-                is_ertesi = True
+            
+        for term in search_terms:
+            if term in c_low:
+                found_cols.append(col)
                 break
-        
-        if is_ertesi:
-            continue # Ertesi gün boş geçilir
-
-        # --- 2. KURAL: Nöbet ---
-        is_nobet = False
-        nobet_ekibi = []
-        for col in nobet_cols:
-            val = str(row[col])
-            if val != "nan" and val != "None":
-                nobet_ekibi.append(val.strip())
-                if user_name in val.lower():
-                    is_nobet = True
-        
-        if is_nobet:
-            e = Event()
-            e.name = "🚨 Nöbet"
-            e.begin = current_date
-            e.make_all_day()
-            e.description = f"Nöbet Ekibi: {', '.join(nobet_ekibi)}"
-            cal.events.add(e)
-            stats["nobet"] += 1
-
-        # --- 3. KURAL: Poliklinik ve Ameliyat ---
-        # Nöbetçi olsan bile gündüz mesaisi yazılabilir, o yüzden 'elif' değil ayrı 'if'
-        for col in pol_ameliyat_cols:
-            val = str(row[col])
-            if user_name in val.lower():
-                e = Event()
-                gorev_adi = col
-                e.name = f"👨‍⚕️ {gorev_adi}"
-                e.description = f"Bulunduğum Birim: {gorev_adi}"
                 
-                # Saat: 08:00 - 17:00
-                e.begin = current_date.replace(hour=8, minute=0)
-                e.end = current_date.replace(hour=17, minute=0)
-                
-                cal.events.add(e)
-                
-                if "AMELİYAT" in col:
-                    stats["ameliyat"] += 1
-                else:
-                    stats["pol"] += 1
+    return found_cols
 
-    return cal, stats
-
-# --- ANA AKIŞ ---
-if uploaded_file is not None and target_name:
-    st.divider()
-    st.subheader("2. Önizleme ve İndirme")
-    
+if asistan_file and uzman_file:
     try:
-        # Dosyayı oku
-        if uploaded_file.name.endswith('.csv'):
-            # Senin dosyan noktalı virgül kullanıyor
-            df = pd.read_csv(uploaded_file, delimiter=";")
-        else:
-            df = pd.read_excel(uploaded_file)
-            
-        # Takvimi oluştur
-        cal, stats = create_calendar(df, target_name)
-        
-        if len(cal.events) == 0:
-            st.warning(f"⚠️ '{target_name}' ismiyle herhangi bir görev bulunamadı. İsmi doğru yazdığınızdan emin olun.")
-        else:
-            # Bilgi Kartları
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Nöbet Sayısı", stats["nobet"])
-            c2.metric("Ameliyat Günleri", stats["ameliyat"])
-            c3.metric("Poliklinik Günleri", stats["pol"])
-            
-            # İndirme Butonu
-            st.success("✅ Takvim başarıyla oluşturuldu!")
-            
-            cal_str = str(cal)
-            st.download_button(
-                label="📥 Takvimi İndir (.ics)",
-                data=cal_str,
-                file_name=f"{target_name.replace(' ', '_')}_takvim.ics",
-                mime="text/calendar"
-            )
-            
-            st.info("İpucu: İndirdiğiniz dosyayı kendinize Mail veya WhatsApp ile gönderip telefondan açın.")
-            
-    except Exception as e:
-        st.error(f"Bir hata oluştu: {e}")
-        st.error("Dosyanın formatının uygun olduğundan (Tarih sütunu, noktalı virgül ayrımı vb.) emin olun.")
+        df_asistan = pd.read_excel(asistan_file) if asistan_file.name.endswith('x') else pd.read_csv(asistan_file)
+        df_uzman = pd.read_excel(uzman_file) if uzman_file.name.endswith('x') else pd.read_csv(uzman_file)
 
-elif uploaded_file is None:
-    st.info("👆 Lütfen önce nöbet listesini (CSV veya Excel) yükleyin.")
-elif not target_name:
-    st.warning("👆 Lütfen adınızı girin.")
+        df_asistan = clean_df(df_asistan)
+        df_uzman = clean_df(df_uzman)
+
+        # --- Temel Sütunları Bul ---
+        cols_a = df_asistan.columns
+        cols_u = df_uzman.columns
+
+        col_date_a = find_col(cols_a, ["tarih", "gün", "date"]) or cols_a[0]
+        col_name_a = find_col(cols_a, ["ad", "soyad", "isim", "asistan"]) or cols_a[1]
+        col_task_a = find_col(cols_a, ["görev", "yer", "durum"]) or cols_a[2]
+
+        col_date_u = find_col(cols_u, ["tarih", "gün", "date"]) or cols_u[0]
+        col_nobet_u = find_col(cols_u, ["nöbet", "icap"])
+
+        target_person = st.selectbox("Kimin Programı?", df_asistan[col_name_a].dropna().unique())
+
+        if st.button("🚀 Akıllı Takvimi Oluştur"):
+            cal = Calendar()
+            
+            # Tarih formatlama
+            df_asistan[col_date_a] = pd.to_datetime(df_asistan[col_date_a], dayfirst=True, errors='coerce')
+            df_uzman[col_date_u] = pd.to_datetime(df_uzman[col_date_u], dayfirst=True, errors='coerce')
+
+            my_schedule = df_asistan[df_asistan[col_name_a] == target_person]
+            
+            count = 0
+            for index, row in my_schedule.iterrows():
+                current_date = row[col_date_a]
+                if pd.isna(current_date): continue
+                
+                gorev = str(row[col_task_a]).strip()
+                gorev_lower = gorev.lower()
+
+                event = Event()
+                event.begin = current_date
+                event.make_all_day()
+                
+                baslik = gorev
+                aciklama = f"Görev: {gorev}"
+
+                # Uzman satırını bul
+                uzman_row = df_uzman[df_uzman[col_date_u] == current_date]
+
+                if not uzman_row.empty:
+                    uzman_data = uzman_row.iloc[0]
+
+                    # --- A) NÖBET KONTROLÜ ---
+                    if "nöbet" in gorev_lower and col_nobet_u:
+                        hoca = uzman_data[col_nobet_u]
+                        if pd.notna(hoca):
+                            baslik += f" ({hoca})"
+                            aciklama += f"\nNöbetçi Uzman: {hoca}"
+
+                    # --- B) DİNAMİK GÖREV EŞLEŞTİRME (Poliklinik, Ameliyat vb.) ---
+                    else:
+                        # Görev ismine göre uygun uzman sütunlarını bul
+                        # Örn: Görev="Poliklinik" ise UzmanDosyası="Pol 1", "Pol 2" sütunlarını bulur.
+                        ilgili_sutunlar = get_matching_expert_columns(cols_u, gorev)
+                        
+                        if ilgili_sutunlar:
+                            # O sütunlardaki hocaları topla
+                            aktif_hocalar = []
+                            for col in ilgili_sutunlar:
+                                h_isim = uzman_data[col]
+                                if pd.notna(h_isim) and str(h_isim).strip() != "":
+                                    aktif_hocalar.append(f"{col}: {h_isim}") # "Pol 1: Dr. X" formatında sakla
+                            
+                            if aktif_hocalar:
+                                # Sıralama Mantığı (Round Robin)
+                                gunun_asistanlari = df_asistan[
+                                    (df_asistan[col_date_a] == current_date) & 
+                                    (df_asistan[col_task_a] == row[col_task_a])
+                                ]
+                                asistan_listesi = gunun_asistanlari[col_name_a].tolist()
+
+                                try:
+                                    my_index = asistan_listesi.index(target_person)
+                                    
+                                    # Mod alarak eşleştir
+                                    atanan_index = my_index % len(aktif_hocalar)
+                                    atanan_bilgi = aktif_hocalar[atanan_index] # Örn: "Pol 1: Dr. Ahmet"
+                                    
+                                    # Başlığa ve Açıklamaya ekle
+                                    col_name, hoca_name = atanan_bilgi.split(":", 1)
+                                    baslik += f" - {hoca_name.strip()}"
+                                    aciklama += f"\nEşleşme: {atanan_bilgi}"
+                                    
+                                except ValueError:
+                                    pass
+
+                event.name = baslik
+                event.description = aciklama
+                cal.events.add(event)
+                count += 1
+
+            st.success(f"{count} görev işlendi.")
+            st.download_button(label="📥 İndir", data=str(cal), file_name="Takvim.ics", mime="text/calendar")
+
+    except Exception as e:
+        st.error(f"Hata: {e}")
+else:
+    st.info("Dosyaları yükleyin.")
