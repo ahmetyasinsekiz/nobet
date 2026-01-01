@@ -2,145 +2,111 @@ import streamlit as st
 import pandas as pd
 from ics import Calendar, Event
 
-# Sayfa Ayarları
-st.set_page_config(page_title="Kişisel Nöbet Takvimi (Manuel Düzeltmeli)", page_icon="🛠️")
+st.set_page_config(page_title="Nöbet Asistanı", page_icon="📅")
 
-st.title("🛠️ Nöbet Programı Oluşturucu")
-st.info("Eğer isim listesinde 'Pazartesi, Salı' gibi günler çıkıyorsa, aşağıdan **Sütun Ayarları** kısmını açıp 'Asistan İsmi' sütununu değiştirin.")
+st.title("📅 Nöbet ve Ameliyat Takvimi")
+st.markdown("Dosyaları yükle, adını yaz ve takvimini al. Gerisini sistem halleder.")
 
-# --- 1. DOSYA YÜKLEME ---
+# --- 1. SADECE DOSYA YÜKLEME VE İSİM GİRİŞİ ---
 col1, col2 = st.columns(2)
 with col1:
-    asistan_file = st.file_uploader("📂 1. Asistan Listesi", type=["xlsx", "xls", "csv"])
+    asistan_file = st.file_uploader("1. Asistan Listesi", type=["xlsx", "xls", "csv"])
 with col2:
-    uzman_file = st.file_uploader("📂 2. Uzman Listesi", type=["xlsx", "xls", "csv"])
+    uzman_file = st.file_uploader("2. Uzman Listesi", type=["xlsx", "xls", "csv"])
 
-# --- YARDIMCI FONKSİYONLAR ---
+# Eski usül, basit isim kutusu
+user_name = st.text_input("Adın Soyadın (Listede yazdığı gibi)", placeholder="Örn: Tahir").strip()
+
+# --- ARKA PLAN MOTORU (SENİN GÖRMENE GEREK OLMAYAN KISIM) ---
 def clean_df(df):
-    """Boşlukları temizle"""
     df = df.dropna(how='all')
     df.columns = df.columns.astype(str).str.strip()
     return df
 
-def find_col(columns, keywords, fallback_index=0):
-    """Sütun bulamazsa varsayılan indexi döndür"""
+def find_col(columns, keywords):
+    """Sütun ismini tahmin eder"""
     for col in columns:
         for key in keywords:
             if key in col.lower():
                 return col
-    # Bulamazsa ve index geçerliyse onu döndür
-    if 0 <= fallback_index < len(columns):
-        return columns[fallback_index]
-    return columns[0]
+    return None
 
-def get_matching_expert_columns(expert_cols, task_name):
-    """Görevin ismine göre uzman sütunlarını bulur"""
+def get_expert_columns(expert_cols, task_name):
+    """Göreve uygun uzman sütunlarını bulur"""
     task_lower = str(task_name).lower()
     found_cols = []
     
+    # Kelime haritası
     keywords_map = {
-        "ameliyat": ["ameliyat", "masa", "salon", "oda", "operasyon"],
+        "ameliyat": ["ameliyat", "masa", "salon", "oda"],
         "poliklinik": ["poliklinik", "pol", "poli"],
-        "servis": ["servis", "yatak", "klinik"],
-        "lab": ["laboratuvar", "lab"]
+        "servis": ["servis", "klinik"]
     }
     
-    search_terms = []
+    search_terms = [task_lower] # Varsayılan olarak görevin kendisini ara
     for key, terms in keywords_map.items():
         if key in task_lower:
             search_terms = terms
             break
-            
-    if not search_terms:
-        search_terms = [task_lower]
 
+    # Sütunları tara
     for col in expert_cols:
         c_low = col.lower()
-        if "tarih" in c_low or "nöbet" in c_low or "icap" in c_low:
-            continue
+        if "tarih" in c_low or "nöbet" in c_low: continue
         for term in search_terms:
             if term in c_low:
                 found_cols.append(col)
-                break     
+                break
     return found_cols
 
-# --- ANA İŞLEM ---
-if asistan_file and uzman_file:
-    try:
-        # Dosyaları Oku
-        df_asistan = pd.read_excel(asistan_file) if asistan_file.name.endswith('x') else pd.read_csv(asistan_file)
-        df_uzman = pd.read_excel(uzman_file) if uzman_file.name.endswith('x') else pd.read_csv(uzman_file)
+if asistan_file and user_name:
+    if st.button("Takvimi Oluştur"):
+        try:
+            # Dosyaları oku
+            df_asistan = pd.read_excel(asistan_file) if asistan_file.name.endswith('x') else pd.read_csv(asistan_file)
+            df_asistan = clean_df(df_asistan)
+            
+            # Uzman dosyası varsa onu da oku, yoksa boş geç (Hata vermesin)
+            df_uzman = pd.DataFrame()
+            if uzman_file:
+                df_uzman = pd.read_excel(uzman_file) if uzman_file.name.endswith('x') else pd.read_csv(uzman_file)
+                df_uzman = clean_df(df_uzman)
 
-        df_asistan = clean_df(df_asistan)
-        df_uzman = clean_df(df_uzman)
+            # --- OTOMATİK SÜTUN BULMA ---
+            cols_a = df_asistan.columns
+            col_date_a = find_col(cols_a, ["tarih", "gün", "date"]) or cols_a[0]
+            col_name_a = find_col(cols_a, ["ad", "soyad", "isim", "asistan"]) or cols_a[1]
+            col_task_a = find_col(cols_a, ["görev", "yer", "durum"]) or cols_a[2]
 
-        # --- SÜTUNLARI BELİRLEME (KULLANICI SEÇİMİ) ---
-        st.write("---")
-        st.subheader("⚙️ Sütun Ayarları (Otomatik Tanılandı, Kontrol Et)")
-        
-        c1, c2, c3 = st.columns(3)
-        
-        # Otomatik tahminler
-        cols_a = df_asistan.columns.tolist()
-        cols_u = df_uzman.columns.tolist()
-
-        # Asistan Tablosu Tahminleri
-        # İsim genelde 2. veya 3. sütundadır (Index 1 veya 2).
-        # Gün sütunu (Index 1) ile karışmaması için varsayılanı değiştirebilirsiniz.
-        guess_date_a = find_col(cols_a, ["tarih", "gün", "date"], 0)
-        guess_name_a = find_col(cols_a, ["ad", "soyad", "isim", "asistan", "personel"], 2) # Varsayılan 3. sütun
-        guess_task_a = find_col(cols_a, ["görev", "yer", "durum"], 3) # Varsayılan 4. sütun
-
-        # Uzman Tablosu Tahminleri
-        guess_date_u = find_col(cols_u, ["tarih", "gün", "date"], 0)
-        guess_nobet_u = find_col(cols_u, ["nöbet", "icap"], -1) # Bulamazsa seçme
-
-        # KULLANICIYA SEÇTİRME
-        with c1:
-            col_date_a = st.selectbox("Asistan Dosyası - Tarih", cols_a, index=cols_a.index(guess_date_a))
-            col_date_u = st.selectbox("Uzman Dosyası - Tarih", cols_u, index=cols_u.index(guess_date_u))
-        
-        with c2:
-            # İşte burası sorunu çözecek olan yer:
-            col_name_a = st.selectbox("Asistan Dosyası - İsim", cols_a, index=cols_a.index(guess_name_a))
-            col_nobet_u = st.selectbox("Uzman Dosyası - Nöbetçi", cols_u, index=cols_u.index(guess_nobet_u) if guess_nobet_u in cols_u else 0)
-
-        with c3:
-            col_task_a = st.selectbox("Asistan Dosyası - Görev", cols_a, index=cols_a.index(guess_task_a))
-
-        # --- İSİM LİSTESİNİ GÜNCELLE ---
-        # Seçilen sütuna göre isimleri tekrar çekiyoruz
-        isim_listesi = sorted([str(x) for x in df_asistan[col_name_a].dropna().unique().tolist()])
-        
-        st.write("---")
-        target_person = st.selectbox(
-            "👤 **Kendi Adınızı Seçiniz:**", 
-            isim_listesi,
-            index=None,
-            placeholder="Listeden adınızı bulun..."
-        )
-
-        if st.button("📅 Takvimi Oluştur"):
-            if not target_person:
-                st.warning("Lütfen bir isim seçin!")
-            else:
-                cal = Calendar()
-                
-                # Tarih Formatla
-                df_asistan[col_date_a] = pd.to_datetime(df_asistan[col_date_a], dayfirst=True, errors='coerce')
+            # Uzman sütunları (Eğer dosya varsa)
+            col_date_u = None
+            col_nobet_u = None
+            if not df_uzman.empty:
+                cols_u = df_uzman.columns
+                col_date_u = find_col(cols_u, ["tarih", "gün", "date"]) or cols_u[0]
+                col_nobet_u = find_col(cols_u, ["nöbet", "icap"])
+                # Tarihleri düzelt
                 df_uzman[col_date_u] = pd.to_datetime(df_uzman[col_date_u], dayfirst=True, errors='coerce')
 
-                # Kişiyi filtrele
-                my_schedule = df_asistan[df_asistan[col_name_a].astype(str) == str(target_person)]
-                
+            # Asistan tarihlerini düzelt
+            df_asistan[col_date_a] = pd.to_datetime(df_asistan[col_date_a], dayfirst=True, errors='coerce')
+
+            # --- FİLTRELEME ---
+            # Kullanıcının adını içeren satırları bul (Büyük/küçük harf duyarsız)
+            my_schedule = df_asistan[df_asistan[col_name_a].astype(str).str.contains(user_name, case=False, na=False)]
+
+            if my_schedule.empty:
+                st.error("Girdiğin isim listede bulunamadı. Lütfen kontrol et.")
+            else:
+                cal = Calendar()
                 count = 0
+
                 for index, row in my_schedule.iterrows():
                     current_date = row[col_date_a]
                     if pd.isna(current_date): continue
                     
                     gorev = str(row[col_task_a]).strip()
-                    gorev_lower = gorev.lower()
-
+                    
                     event = Event()
                     event.begin = current_date
                     event.make_all_day()
@@ -148,66 +114,74 @@ if asistan_file and uzman_file:
                     baslik = gorev
                     aciklama = f"Görev: {gorev}"
 
-                    # Uzman Eşleştirme
-                    uzman_row = df_uzman[df_uzman[col_date_u] == current_date]
+                    # --- UZMAN EŞLEŞTİRME (Sadece uzman dosyası varsa çalışır) ---
+                    if not df_uzman.empty and col_date_u:
+                        uzman_row = df_uzman[df_uzman[col_date_u] == current_date]
+                        
+                        if not uzman_row.empty:
+                            uzman_data = uzman_row.iloc[0]
+                            gorev_low = gorev.lower()
 
-                    if not uzman_row.empty:
-                        uzman_data = uzman_row.iloc[0]
-
-                        # A) Nöbet
-                        if "nöbet" in gorev_lower and col_nobet_u:
-                            hoca = uzman_data[col_nobet_u]
-                            if pd.notna(hoca):
-                                baslik += f" ({hoca})"
-                                aciklama += f"\nNöbetçi Uzman: {hoca}"
-
-                        # B) Diğer Görevler
-                        else:
-                            ilgili_sutunlar = get_matching_expert_columns(cols_u, gorev)
-                            if ilgili_sutunlar:
-                                aktif_hocalar = []
-                                for col in ilgili_sutunlar:
-                                    h_isim = uzman_data[col]
-                                    if pd.notna(h_isim) and str(h_isim).strip() != "":
-                                        aktif_hocalar.append(f"{h_isim}")
+                            # 1. NÖBETÇİ EŞLEŞMESİ
+                            if "nöbet" in gorev_low and col_nobet_u:
+                                hoca = uzman_data[col_nobet_u]
+                                if pd.notna(hoca):
+                                    baslik += f" ({hoca})"
+                                    aciklama += f"\nNöbetçi Uzman: {hoca}"
+                            
+                            # 2. MASALAR / POLİKLİNİKLER (ROUND ROBIN)
+                            else:
+                                # Bu göreve uygun sütunları bul (Masa, Pol vb.)
+                                ilgili_sutunlar = get_expert_columns(df_uzman.columns, gorev)
                                 
-                                if aktif_hocalar:
-                                    # Sıralama mantığı
-                                    gunun_asistanlari = df_asistan[
-                                        (df_asistan[col_date_a] == current_date) & 
-                                        (df_asistan[col_task_a] == row[col_task_a])
-                                    ]
-                                    asistan_listesi_gunluk = [str(x) for x in gunun_asistanlari[col_name_a].tolist()]
-
-                                    try:
-                                        my_index = asistan_listesi_gunluk.index(str(target_person))
-                                        atanan_index = my_index % len(aktif_hocalar)
-                                        atanan_hoca = aktif_hocalar[atanan_index]
+                                if ilgili_sutunlar:
+                                    # O günkü hocaları topla
+                                    aktif_hocalar = []
+                                    for col in ilgili_sutunlar:
+                                        h = uzman_data[col]
+                                        if pd.notna(h) and str(h).strip() != "":
+                                            aktif_hocalar.append(f"{h}")
+                                    
+                                    if aktif_hocalar:
+                                        # O günkü benim sıramı bul
+                                        gunun_asistanlari = df_asistan[
+                                            (df_asistan[col_date_a] == current_date) & 
+                                            (df_asistan[col_task_a] == row[col_task_a])
+                                        ]
+                                        # İsimleri listeye al
+                                        isim_listesi = gunun_asistanlari[col_name_a].astype(str).tolist()
                                         
-                                        baslik += f" - {atanan_hoca}"
-                                        aciklama += f"\nEşleşme: {atanan_hoca}"
-                                    except ValueError:
-                                        pass
+                                        # Benim ismim listede nerede? (Contains ile bulmaya çalışalım)
+                                        my_index = -1
+                                        for i, name in enumerate(isim_listesi):
+                                            if user_name.lower() in name.lower():
+                                                my_index = i
+                                                break
+                                        
+                                        if my_index != -1:
+                                            # Matematik: Sıra % Hoca Sayısı
+                                            atanan_index = my_index % len(aktif_hocalar)
+                                            atanan_hoca = aktif_hocalar[atanan_index]
+                                            
+                                            baslik += f" - {atanan_hoca}"
+                                            aciklama += f"\nEşleşilen Uzman: {atanan_hoca}"
 
                     event.name = baslik
                     event.description = aciklama
                     cal.events.add(event)
                     count += 1
 
-                if count > 0:
-                    st.success(f"✅ {target_person} için {count} görev bulundu!")
-                    file_name_str = f"{str(target_person).replace(' ', '_')}_Program.ics"
-                    st.download_button(
-                        label="📥 İNDİR",
-                        data=str(cal),
-                        file_name=file_name_str,
-                        mime="text/calendar"
-                    )
-                else:
-                    st.warning("Bu kişi için uygun tarih/görev bulunamadı.")
+                st.success(f"✅ {count} adet görev bulundu ve hazırlandı.")
+                
+                # İNDİRME BUTONU
+                safe_name = user_name.replace(" ", "_")
+                st.download_button(
+                    label="📥 Takvimini İndir",
+                    data=str(cal),
+                    file_name=f"{safe_name}_Program.ics",
+                    mime="text/calendar"
+                )
 
-    except Exception as e:
-        st.error(f"Hata oluştu: {e}")
-
-else:
-    st.info("Lütfen dosyaları yükleyin.")
+        except Exception as e:
+            st.error("Bir hata oluştu. Dosyaların formatı bozuk olabilir.")
+            st.error(f"Detay: {e}")
