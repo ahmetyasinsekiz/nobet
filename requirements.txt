@@ -1,5 +1,4 @@
 streamlit
-ics==0.7.2
 pandas
 openpyxl
-
+ics>=0.8.0
