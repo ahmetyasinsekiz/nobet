@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
-from ics import Calendar, Event
-from datetime import datetime
+from icalendar import Calendar, Event
+from datetime import datetime, timedelta
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="Nöbet Takvimi", page_icon="📅")
 
-# --- BAŞLIK VE AÇIKLAMA (YENİLENDİ) ---
+# --- BAŞLIK VE AÇIKLAMA ---
 st.title("📅 Asistan Nöbet & İş Takvimi")
 
 st.markdown("""
@@ -39,9 +39,6 @@ def clean_col_name(col):
     return str(col).strip().upper()
 
 def get_active_surgery_experts(df_uzman, current_date):
-    """
-    O günkü 'AMELİYAT' sütunlarındaki hocaları soldan sağa sırayla getirir.
-    """
     if df_uzman is None or df_uzman.empty:
         return []
 
@@ -64,7 +61,6 @@ def get_active_surgery_experts(df_uzman, current_date):
     return active_experts
 
 def get_pol_expert(df_uzman, current_date, pol_index):
-    """Poliklinik eşleşmesi"""
     if df_uzman is None or df_uzman.empty: return None
 
     date_col = df_uzman.columns[0]
@@ -85,14 +81,15 @@ def get_pol_expert(df_uzman, current_date, pol_index):
 # --- ANA İŞLEM ---
 def create_calendar(df_asistan, df_uzman, user_name):
     cal = Calendar()
+    cal.add('prodid', '-//Asistan Nöbet Takvimi//TR//')
+    cal.add('version', '2.0')
+    
     user_name = user_name.lower().strip()
     
-    # Sütunları temizle
     df_asistan.columns = [clean_col_name(c) for c in df_asistan.columns]
     if df_uzman is not None:
         df_uzman.columns = [clean_col_name(c) for c in df_uzman.columns]
 
-    # Asistan Sütunlarını Grupla
     nobet_cols = [c for c in df_asistan.columns if "NÖBET" in c and "ERTESİ" not in c]
     acil_cols = [c for c in df_asistan.columns if "ACİL" in c]
     ameliyat_cols = sorted([c for c in df_asistan.columns if "AMELİYAT" in c and "SURTIME" not in c]) 
@@ -102,7 +99,6 @@ def create_calendar(df_asistan, df_uzman, user_name):
     count = 0
 
     for idx, row in df_asistan.iterrows():
-        # Tarih Okuma
         date_val = row.iloc[0]
         try:
             if isinstance(date_val, str):
@@ -117,7 +113,7 @@ def create_calendar(df_asistan, df_uzman, user_name):
             else: continue
         except: continue
 
-        # --- A) NÖBET ---
+        # --- A) NÖBET (Tüm Gün) ---
         is_nobet = False
         nobet_ekibi = []
         for col in nobet_cols:
@@ -128,9 +124,7 @@ def create_calendar(df_asistan, df_uzman, user_name):
             
         if is_nobet:
             e = Event()
-            e.summary = "🚨 Nöbet" # DEĞİŞTİ: e.name yerine e.summary
-            e.begin = current_date
-            e.make_all_day()
+            summary = "🚨 Nöbet"
             desc = f"Ekip: {', '.join(nobet_ekibi)}"
             
             # Nöbetçi Uzman
@@ -144,28 +138,30 @@ def create_calendar(df_asistan, df_uzman, user_name):
                     if not u_row.empty:
                         hoca = u_row.iloc[0][nobet_u_cols[0]]
                         if pd.notna(hoca):
-                            e.summary += f" ({hoca})"
+                            summary += f" ({hoca})"
                             desc += f"\nNöbetçi Uzman: {hoca}"
-            e.description = desc
-            cal.events.append(e) # DEĞİŞTİ: add() yerine append()
+            
+            e.add('summary', summary)
+            e.add('description', desc)
+            e.add('dtstart', current_date.date()) 
+            e.add('dtend', current_date.date() + timedelta(days=1)) # icalendar kuralları gereği tam gün etkinliği ertesi güne kadar uzanmalı
+            cal.add_component(e)
             count += 1
 
-        # --- B) GÜNDÜZ GÖREVLERİ ---
+        # --- B) GÜNDÜZ GÖREVLERİ (Saatli) ---
         for col in tum_gorevler:
             val = str(row[col])
             
             if pd.notna(val) and user_name in str(val).lower():
                 e = Event()
                 
-                # İsimlendirme (DEĞİŞTİ: e.name yerine e.summary)
-                if "ACİL" in col: e.summary = f"🚑 {col}"
-                elif "AMELİYAT" in col: e.summary = f"🔪 {col}"
-                elif "POL" in col: e.summary = f"👨‍⚕️ {col}"
-                else: e.summary = f"📋 {col}"
+                # İsimlendirme
+                if "ACİL" in col: summary = f"🚑 {col}"
+                elif "AMELİYAT" in col: summary = f"🔪 {col}"
+                elif "POL" in col: summary = f"👨‍⚕️ {col}"
+                else: summary = f"📋 {col}"
                 
-                e.begin = current_date.replace(hour=8, minute=0)
-                e.end = current_date.replace(hour=17, minute=0)
-                e.description = f"Görev Yeri: {col}"
+                desc = f"Görev Yeri: {col}"
                 
                 # 1. Ameliyat Eşleşmesi (Dinamik)
                 if col in ameliyat_cols:
@@ -175,18 +171,23 @@ def create_calendar(df_asistan, df_uzman, user_name):
                         target_index = my_index % len(active_experts)
                         atanan_hoca = active_experts[target_index]
                         
-                        e.summary += f" - {atanan_hoca}"
-                        e.description += f"\n\nSorumlu Uzman: {atanan_hoca}"
+                        summary += f" - {atanan_hoca}"
+                        desc += f"\n\nSorumlu Uzman: {atanan_hoca}"
 
                 # 2. Poliklinik Eşleşmesi
                 elif col in pol_cols:
                     my_index = pol_cols.index(col)
                     hoca_bilgi = get_pol_expert(df_uzman, current_date, my_index)
                     if hoca_bilgi:
-                        e.summary += f" - {hoca_bilgi.split('(')[0]}"
-                        e.description += f"\nSorumlu Uzman: {hoca_bilgi}"
+                        summary += f" - {hoca_bilgi.split('(')[0]}"
+                        desc += f"\nSorumlu Uzman: {hoca_bilgi}"
 
-                cal.events.append(e) # DEĞİŞTİ: add() yerine append()
+                e.add('summary', summary)
+                e.add('description', desc)
+                e.add('dtstart', current_date.replace(hour=8, minute=0))
+                e.add('dtend', current_date.replace(hour=17, minute=0))
+
+                cal.add_component(e)
                 count += 1
 
     return cal, count
@@ -217,7 +218,7 @@ if asistan_file and target_name:
             
             st.download_button(
                 label="📥 Takvimi İndir (.ics)",
-                data=cal.serialize(), # DEĞİŞTİ: str(cal) yerine cal.serialize()
+                data=cal.to_ical(), # icalendar veriyi otomatik formatlar
                 file_name=f"{safe_name}_TAKVIM.ics",
                 mime="text/calendar"
             )
